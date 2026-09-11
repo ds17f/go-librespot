@@ -78,6 +78,7 @@ func (p *AppPlayer) prefetchNext(ctx context.Context) {
 		p.secondaryStream.Source, narrationIntroPrefix)
 
 	p.player.SetSecondaryStream(p.secondarySource)
+	p.metaCache.put(nextId.Uri(), p.secondaryStream.Media)
 
 	p.app.log.WithField("uri", nextId.Uri()).
 		Infof("prefetched %s %s (duration: %dms)", nextId.Type(),
@@ -333,6 +334,12 @@ func (p *AppPlayer) loadContext(ctx context.Context, spotCtx *connectpb.Context,
 
 	p.resumeCurrentEpisode(ctx)
 
+	// Fetch metadata for the context window in the background while the first
+	// track loads, so names and cover art are known before the user skips —
+	// and, when configured, sweep the whole context so every track is known.
+	p.scheduleMetaPrefetch()
+	p.scheduleContextMetaPrefetch(spotCtx.Uri)
+
 	// load current track into stream — skip forward if it (or a run of tracks) is unplayable.
 	if err := p.loadCurrentTrackOrSkip(ctx, paused, drop); err != nil {
 		return fmt.Errorf("failed loading current track (load context): %w", err)
@@ -505,6 +512,13 @@ func (p *AppPlayer) loadCurrentTrack(ctx context.Context, paused, drop bool) err
 	p.state.setPaused(paused) // update IsPaused and PlaybackSpeed
 	p.updateState(ctx)
 	p.schedulePrefetchNext()
+
+	// Remember this track's metadata (under both the requested and the possibly
+	// relinked uri) and top up the cache for the surrounding window, so /status
+	// can describe the upcoming track without a loaded stream.
+	p.metaCache.put(spotId.Uri(), p.primaryStream.Media)
+	p.metaCache.put(p.primaryStream.Media.Id().Uri(), p.primaryStream.Media)
+	p.scheduleMetaPrefetch()
 
 	p.app.server.Emit(&ApiEvent{
 		Type: ApiEventTypeMetadata,
